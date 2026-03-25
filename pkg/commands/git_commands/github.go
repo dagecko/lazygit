@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -92,15 +91,28 @@ type GithubRepositoryOwner struct {
 	Login string `json:"login"`
 }
 
-func fetchPullRequestsQuery(branches []string, owner string, repo string) string {
+type graphQLRequest struct {
+	Query     string            `json:"query"`
+	Variables map[string]string `json:"variables"`
+}
+
+func fetchPullRequestsQuery(branches []string, owner string, repo string) (string, map[string]string) {
+	variables := make(map[string]string, len(branches)+2)
+	variables["owner"] = owner
+	variables["repo"] = repo
+	varDecls := make([]string, 0, len(branches)+2)
+	varDecls = append(varDecls, "$owner: String!", "$repo: String!")
 	queries := make([]string, 0, len(branches))
 	for i, branch := range branches {
 		// We're making a sub-query per branch, and arbitrarily labelling each subquery
 		// as a1, a2, etc.
 		fieldName := fmt.Sprintf("a%d", i+1)
+		varName := fmt.Sprintf("branch%d", i+1)
+		variables[varName] = branch
+		varDecls = append(varDecls, fmt.Sprintf("$%s: String!", varName))
 		// We fetch a few PRs per branch name because multiple forks may have PRs
 		// with the same head ref name. The mapping logic filters by owner later.
-		queries = append(queries, fmt.Sprintf(`%s: pullRequests(first: 5, headRefName: "%s", orderBy: {field: CREATED_AT, direction: DESC}) {
+		queries = append(queries, fmt.Sprintf(`%s: pullRequests(first: 5, headRefName: $%s, orderBy: {field: CREATED_AT, direction: DESC}) {
       edges {
         node {
           title
@@ -108,22 +120,22 @@ func fetchPullRequestsQuery(branches []string, owner string, repo string) string
           state
           number
           url
-		  isDraft
+          isDraft
           headRepositoryOwner {
             login
           }
         }
       }
-    }`, fieldName, branch))
+    }`, fieldName, varName))
 	}
 
-	queryString := fmt.Sprintf(`{
-  repository(owner: "%s", name: "%s") {
+	queryString := fmt.Sprintf(`query(%s) {
+  repository(owner: $owner, name: $repo) {
     %s
   }
-}`, owner, repo, strings.Join(queries, "\n"))
+}`, strings.Join(varDecls, ", "), strings.Join(queries, "\n"))
 
-	return queryString
+	return queryString, variables
 }
 
 func (self *GitHubCommands) GetAuthToken() string {
@@ -187,11 +199,13 @@ func (self *GitHubCommands) FetchRecentPRs(branches []string, baseRemote *models
 }
 
 func (self *GitHubCommands) fetchRecentPRsAux(repoOwner string, repoName string, branches []string, token string) ([]*models.GithubPullRequest, error) {
-	queryString := fetchPullRequestsQuery(branches, repoOwner, repoName)
-	escapedQueryString := strconv.Quote(queryString)
+	queryString, variables := fetchPullRequestsQuery(branches, repoOwner, repoName)
 
-	body := fmt.Sprintf(`{"query": %s}`, escapedQueryString)
-	req, err := http.NewRequest("POST", "https://api.github.com/graphql", bytes.NewBuffer([]byte(body)))
+	bodyBytes, err := json.Marshal(graphQLRequest{Query: queryString, Variables: variables})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest("POST", "https://api.github.com/graphql", bytes.NewBuffer(bodyBytes))
 	if err != nil {
 		return nil, err
 	}
@@ -212,13 +226,13 @@ func (self *GitHubCommands) fetchRecentPRsAux(repoOwner string, repoName string,
 		return nil, fmt.Errorf("GraphQL query failed with status: %s. Body: %s", resp.Status, bodyStr.String())
 	}
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 
 	var result Response
-	err = json.Unmarshal(bodyBytes, &result)
+	err = json.Unmarshal(respBytes, &result)
 	if err != nil {
 		return nil, err
 	}
