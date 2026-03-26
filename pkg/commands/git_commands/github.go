@@ -36,7 +36,7 @@ func (self *GitHubCommands) ConfiguredBaseRemoteName() string {
 	// "jesseduffield/lazygit").
 
 	cmdArgs := NewGitCmd("config").
-		Arg("get", "--local", "--all", "--show-names", "--regexp", `remote\..*\.gh-resolved`).
+		Arg("--local", "--get-regexp", `remote\..*\.gh-resolved`).
 		ToArgv()
 
 	output, _, err := self.cmd.New(cmdArgs).DontLog().RunWithOutputs()
